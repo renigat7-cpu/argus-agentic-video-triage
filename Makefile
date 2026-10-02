@@ -2,7 +2,7 @@ SHELL := /bin/bash
 PY ?= .venv/bin/python
 PORT ?= 8080
 
-.PHONY: help venv install lock run api eval test lint fmt docker clean
+.PHONY: help venv install lock run api eval evidence test lint fmt docker clean
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -22,6 +22,11 @@ api: ## Run the web endpoint
 
 eval: ## Run the evaluation harness
 	$(PY) -m argus.eval --clips 12 --out var/eval
+
+evidence: eval ## Regenerate judge-accessible evidence under docs/evidence
+	mkdir -p docs/evidence
+	cp var/eval/metrics.json var/eval/summary.json var/eval/rows.json docs/evidence/
+	cp var/eval/runs/decisions.jsonl docs/evidence/decisions.jsonl
 
 test: ## Run the test suite
 	$(PY) -m pytest

@@ -90,7 +90,8 @@ stage.
 
 `python -m argus.eval --clips 12` generates a labelled synthetic dataset (half the
 clips contain a brief, small, fast-moving event), runs the full pipeline, and writes
-`var/eval/metrics.json`. It reports the metric that matters operationally —
+`var/eval/metrics.json`. A committed, judge-accessible copy of every artefact lives in
+`docs/evidence/` (regenerate with `make evidence`). It reports the metric that matters operationally —
 **missed-event rate** — next to precision/recall, plus selection recall, frame
 reduction, cost per stream-hour and latency.
 
@@ -144,7 +145,8 @@ of real-world performance; it is deliberately not tuned to flatter the system.
   sequence diagram).
 - **OpenCV output changes later actions** — the signal ranking determines the top-K
   frames the agent may fetch, the tool calls it makes, and the gate outcomes; the tool
-  trace and decision record make this explicit and inspectable in `var/decisions.jsonl`.
+  trace and decision record make this explicit and inspectable in
+  `docs/evidence/decisions.jsonl` (see `docs/evidence/README.md`).
 - **Task success / failure handling / observability / human control** — Section 6
   reports success and failure metrics; every decision is logged with rule results and a
   tool trace; ambiguity is escalated to a human rather than guessed.

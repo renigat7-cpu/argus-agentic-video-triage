@@ -143,7 +143,7 @@ def _safe_div(a: float, b: float) -> float:
 
 def evaluate(
     pipeline: TriagePipeline, truths: list[GroundTruth]
-) -> tuple[Metrics, list[dict[str, Any]]]:
+) -> tuple[Metrics, list[dict[str, Any]], list[TriageResult]]:
     """Run the pipeline over labelled clips and compute metrics.
 
     ``selection_recall`` is the fraction of positive clips where selection
@@ -240,7 +240,7 @@ def evaluate(
         baseline_missed_event_rate=round(_safe_div(b_fn, positives), 4),
         baseline_false_positives=b_fp,
     )
-    return metrics, rows
+    return metrics, rows, results
 
 
 def build_dataset(root: Path, n_clips: int = 12, seed: int = 7) -> list[GroundTruth]:
@@ -278,7 +278,7 @@ def main() -> None:
 
     started = time.perf_counter()
     truths = build_dataset(out / "dataset", n_clips=args.clips)
-    metrics, rows = evaluate(pipeline, truths)
+    metrics, rows, results = evaluate(pipeline, truths)
     elapsed = time.perf_counter() - started
 
     (out / "metrics.json").write_text(
@@ -290,9 +290,7 @@ def main() -> None:
     (out / "summary.json").write_text(
         json.dumps(
             {
-                "summary": summarize(
-                    [pipeline.triage(t.clip, location="synthetic-lab") for t in truths[:0]]
-                ),
+                "summary": summarize(results),
                 "wall_clock_s": round(elapsed, 2),
                 "reasoner": pipeline.reasoner.name,
             },

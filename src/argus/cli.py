@@ -73,7 +73,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         )
     pipeline = TriagePipeline(cfg, reasoner_backend=args.reasoner)
     truths = eval_mod.build_dataset(out / "dataset", n_clips=args.clips)
-    metrics, rows = eval_mod.evaluate(pipeline, truths)
+    metrics, rows, _ = eval_mod.evaluate(pipeline, truths)
     out.mkdir(parents=True, exist_ok=True)
     (out / "metrics.json").write_text(json.dumps(metrics.to_dict(), indent=2), encoding="utf-8")
     (out / "rows.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
