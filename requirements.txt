@@ -1,0 +1,9 @@
+# Argus — pinned runtime dependencies.
+# Regenerate with: make lock
+opencv-contrib-python==5.0.0.93
+numpy==2.5.1
+fastapi==0.115.12
+uvicorn==0.34.2
+python-multipart==0.0.20
+jinja2==3.1.6
+httpx==0.28.1

@@ -1,0 +1,27 @@
+{
+  "selection": {
+    "sample_fps": 4.0,
+    "short_side": 320,
+    "top_k": 24,
+    "motion_weight": 1.0,
+    "edge_weight": 0.45,
+    "saliency_weight": 0.55,
+    "color_weight": 0.3,
+    "diversity_ms": 900,
+    "motion_percentile": 90.0,
+    "min_score": 0.08
+  },
+  "policy": {
+    "confirm_at": 0.8,
+    "dismiss_at": 0.35,
+    "escalate_below": 0.8,
+    "max_evidence_frames": 5,
+    "require_motion_for_confirm": true
+  },
+  "cost": {
+    "reasoning_usd_per_call": 0.0025,
+    "select_cpu_usd_per_frame": 0.0000021,
+    "store_usd_per_frame": 0.0000009
+  },
+  "out_dir": "./var"
+}

@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Argus — Agentic Video Triage</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --confirm: #3fb950;
+    --dismiss: #8b949e;
+    --escalate: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  header {
+    border-bottom: 1px solid var(--border); padding: 18px 28px;
+    display: flex; align-items: baseline; gap: 14px;
+  }
+  header h1 { margin: 0; font-size: 20px; letter-spacing: -0.3px; }
+  header .tag { color: var(--muted); }
+  header .cv { margin-left: auto; color: var(--muted); font-size: 12px; }
+  main { max-width: 1080px; margin: 0 auto; padding: 28px; display: grid; gap: 22px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px;
+  }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+  label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .5px; }
+  input[type=file] { color: var(--muted); }
+  input[type=text], select {
+    background: #0d1117; border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 7px 10px;
+  }
+  button {
+    background: var(--accent); color: #04121f; border: 0; border-radius: 6px;
+    padding: 9px 16px; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  .pill {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
+  }
+  .confirm { background: rgba(63,185,80,.15); color: var(--confirm); }
+  .dismiss { background: rgba(139,148,158,.15); color: var(--dismiss); }
+  .escalate { background: rgba(210,153,34,.15); color: var(--escalate); }
+  .verdict { display: flex; align-items: center; gap: 16px; margin-bottom: 14px; }
+  .verdict .conf { font-size: 30px; font-weight: 700; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+  .ok { color: var(--confirm); }
+  .fail { color: #f85149; }
+  .bar { height: 8px; background: #21262d; border-radius: 4px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre {
+    background: #0d1117; border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px; overflow: auto; font-size: 12px; max-height: 340px;
+  }
+  .muted { color: var(--muted); }
+  .hidden { display: none; }
+  .stat { font-size: 24px; font-weight: 700; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Argus</h1>
+  <span class="tag">agentic video triage · OpenCV 5 + AWS</span>
+  <span class="cv" id="health">checking…</span>
+</header>
+
+<main>
+  <section class="panel">
+    <div class="row">
+      <div>
+        <label for="file">Clip</label><br />
+        <input type="file" id="file" accept="video/*" />
+      </div>
+      <div>
+        <label for="location">Location label</label><br />
+        <input type="text" id="location" value="synthetic-lab" />
+      </div>
+      <div>
+        <label for="reasoner">Reasoner</label><br />
+        <select id="reasoner">
+          <option value="heuristic">heuristic (reproducible)</option>
+          <option value="llm">llm (tool-calling)</option>
+        </select>
+      </div>
+      <div style="align-self:flex-end">
+        <button id="run">Triage clip</button>
+      </div>
+    </div>
+    <p class="muted" style="margin-bottom:0">
+      OpenCV 5 ranks frames cheaply, then a tool-using agent verifies each
+      candidate against policy. Low confidence is escalated, never guessed.
+    </p>
+  </section>
+
+  <section id="result" class="panel hidden">
+    <div class="verdict">
+      <span id="badge" class="pill">—</span>
+      <span class="conf" id="conf">0.00</span>
+      <span class="muted" id="rationale"></span>
+    </div>
+
+    <div class="grid2">
+      <div>
+        <label>Frame selection</label>
+        <div class="row" style="gap:26px; margin-top:8px">
+          <div><div class="stat" id="scanned">0</div><span class="muted">scanned</span></div>
+          <div><div class="stat" id="selected">0</div><span class="muted">selected</span></div>
+          <div><div class="stat" id="reduction">0%</div><span class="muted">reduction</span></div>
+          <div><div class="stat" id="latency">0</div><span class="muted">ms</span></div>
+        </div>
+      </div>
+      <div>
+        <label>Cost</label>
+        <div class="row" style="gap:26px; margin-top:8px">
+          <div><div class="stat" id="cost">$0</div><span class="muted">this clip</span></div>
+          <div><div class="stat" id="calls">0</div><span class="muted">tool calls</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid2" style="margin-top:20px">
+      <div>
+        <label>Policy gates</label>
+        <table id="gates"><tbody></tbody></table>
+      </div>
+      <div>
+        <label>Tool trace</label>
+        <table id="traces"><tbody></tbody></table>
+      </div>
+    </div>
+
+    <label style="display:block; margin-top:20px">Raw decision record</label>
+    <pre id="raw"></pre>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+fetch('/healthz').then(r => r.json()).then(h => {
+  $('health').textContent = `OpenCV ${h.opencv} · reasoner ${h.reasoner}`;
+}).catch(() => { $('health').textContent = 'offline'; });
+
+$('run').addEventListener('click', async () => {
+  const file = $('file').files[0];
+  if (!file) { alert('Choose a clip first'); return; }
+  const btn = $('run');
+  btn.disabled = true; btn.textContent = 'Triaging…';
+  try {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('location', $('location').value);
+    form.append('reasoner', $('reasoner').value);
+    const res = await fetch('/api/triage', { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    render(data);
+  } catch (e) {
+    alert('Triage failed: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Triage clip';
+  }
+});
+
+function render(d) {
+  $('result').classList.remove('hidden');
+  const badge = $('badge');
+  badge.textContent = d.decision;
+  badge.className = 'pill ' + d.decision;
+  $('conf').textContent = Number(d.confidence).toFixed(2);
+  $('rationale').textContent = d.rationale || '';
+  $('scanned').textContent = d.n_frames_scanned;
+  $('selected').textContent = d.n_frames_selected;
+  $('reduction').textContent = Math.round(d.reduction_ratio * 100) + '%';
+  $('latency').textContent = Math.round(d.latency_ms);
+  $('cost').textContent = '$' + Number(d.cost_usd).toFixed(6);
+  $('calls').textContent = (d.tool_calls || []).length;
+
+  $('gates').querySelector('tbody').innerHTML = (d.rules || []).map(r => `
+    <tr>
+      <td class="${r.passed ? 'ok' : 'fail'}">${r.passed ? 'PASS' : 'FAIL'}</td>
+      <td>${r.rule}</td>
+      <td>${Number(r.confidence).toFixed(2)}</td>
+      <td class="muted">${r.rationale || ''}</td>
+    </tr>`).join('');
+
+  $('traces').querySelector('tbody').innerHTML = (d.tool_calls || []).map(t => `
+    <tr>
+      <td>${t.ok ? '✓' : '✗'}</td>
+      <td>${t.name}</td>
+      <td class="muted">${Number(t.duration_ms).toFixed(1)} ms</td>
+    </tr>`).join('');
+
+  $('raw').textContent = JSON.stringify(d, null, 2);
+}
+</script>
+</body>
+</html>

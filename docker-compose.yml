@@ -1,0 +1,20 @@
+services:
+  argus:
+    build: .
+    image: argus-triage:0.1.0
+    ports:
+      - "8080:8080"
+    environment:
+      ARGUS_OUT_DIR: /data
+      ARGUS_REASONER: ${ARGUS_REASONER:-heuristic}
+      ARGUS_LLM_BASE_URL: ${ARGUS_LLM_BASE_URL:-}
+      ARGUS_LLM_MODEL: ${ARGUS_LLM_MODEL:-gpt-4o-mini}
+      ARGUS_LLM_KEY: ${ARGUS_LLM_KEY:-}
+    volumes:
+      - ./var:/data
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true

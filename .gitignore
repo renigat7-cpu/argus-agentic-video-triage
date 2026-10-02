@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Argus artefacts
+var/
+*.whl
+*.mp4
+
+# Secrets
+.env
+
+# OS
+.DS_Store
