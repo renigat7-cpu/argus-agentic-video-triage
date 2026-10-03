@@ -47,4 +47,7 @@ ignore = ["E501"]
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true
-warn_unused_ignores = true
+# OpenCV contrib stubs vary between wheel/system installs (saliency, img_hash,
+# VideoWriter_fourcc). Keep the targeted `type: ignore`s valid in both, without
+# failing the build when a richer stub set makes them unnecessary.
+warn_unused_ignores = false
