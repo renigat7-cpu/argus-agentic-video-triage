@@ -17,5 +17,10 @@ var/
 # Secrets
 .env
 
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+
 # OS
 .DS_Store
