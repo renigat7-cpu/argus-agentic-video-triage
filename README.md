@@ -1,5 +1,6 @@
 # Argus — Agentic Video Triage (OpenCV 5 + AWS)
 
+[![CI](https://github.com/renigat7-cpu/argus-agentic-video-triage/actions/workflows/ci.yml/badge.svg)](https://github.com/renigat7-cpu/argus-agentic-video-triage/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Argus watches long video and answers one question: **did something happen that a
@@ -65,8 +66,9 @@ Remove the OpenCV stage and the agent has nothing to act on.
 ▶️ **[youtube.com/watch?v=k9v5T1SAocA](https://www.youtube.com/watch?v=k9v5T1SAocA)** —
 walkthrough of triage, the escalation queue and a human verdict.
 
-**Disclosure:** the presenter in the video is an AI-generated avatar. The system
-behind it is the real code in this repository; the voice and face are synthetic.
+**Disclosure:** the narration is synthetic (AI text-to-speech) and the on-screen
+presenter is a generated graphic — no human presenter appears. The system shown is
+the real code in this repository.
 
 ## Quickstart
 
