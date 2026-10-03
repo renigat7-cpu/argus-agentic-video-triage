@@ -7,7 +7,7 @@ from argus.selection import combine_score, select_frames
 from argus.signals import FrameSignals
 
 
-def _sig(index: int, t: float, motion: float) -> FrameSignals:
+def _sig(index: int, t: float, motion: float, phash: str = "") -> FrameSignals:
     return FrameSignals(
         index=index,
         timestamp_s=t,
@@ -17,6 +17,7 @@ def _sig(index: int, t: float, motion: float) -> FrameSignals:
         saliency=0.2,
         color_anomaly=0.05,
         luma=0.5,
+        phash=phash,
     )
 
 
@@ -54,3 +55,34 @@ def test_empty_signals_is_safe():
     candidates, diag = select_frames([], SelectionConfig())
     assert candidates == []
     assert diag["selected"] == 0
+
+
+def test_near_duplicate_perceptual_hashes_are_rejected():
+    """OpenCV 5 img_hash diversity: identical-looking frames are not evidence."""
+
+    cfg = SelectionConfig(top_k=4, diversity_ms=10, sample_fps=10, motion_percentile=0.0)
+    same = "a1a2a3a4a5a6a7a8"
+    signals = [
+        _sig(i, i * 0.5, 0.9, phash=same) for i in range(4)
+    ] + [_sig(4, 4.0, 0.9, phash="ffffffffffffffff")]
+
+    candidates, diag = select_frames(signals, cfg)
+    chosen = [c for c in candidates if c.selected]
+
+    assert len(chosen) == 2, "only the visually distinct frame survives the burst"
+    assert {c.signals.phash for c in chosen} == {same, "ffffffffffffffff"}
+    assert diag["phash_duplicates"] == 3.0
+    reasons = {c.rejected_reason for c in candidates if not c.selected}
+    assert "phash-near-duplicate" in reasons
+
+
+def test_distant_perceptual_hashes_are_kept():
+    cfg = SelectionConfig(top_k=4, diversity_ms=10, sample_fps=10, motion_percentile=0.0)
+    signals = [
+        _sig(0, 0.0, 0.9, phash="0000000000000000"),
+        _sig(1, 1.0, 0.9, phash="ffffffffffffffff"),
+    ]
+
+    candidates, _ = select_frames(signals, cfg)
+
+    assert len([c for c in candidates if c.selected]) == 2
