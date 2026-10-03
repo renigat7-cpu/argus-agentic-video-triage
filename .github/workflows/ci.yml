@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # OpenCV pulls in X11/GL libs at import time on some runners; headless is not
+  # used because the pipeline needs cv2.img_hash + cv2.saliency from contrib.
+
+jobs:
+  lint:
+    name: Lint (ruff + mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            pyproject.toml
+
+      - name: Install ruff and mypy
+        run: |
+          python -m pip install --upgrade pip
+          for attempt in 1 2 3; do
+            python -m pip install --retries 5 --timeout 60 "ruff>=0.6" "mypy>=1.11" && break
+            echo "pip install failed (attempt ${attempt}), retrying..."
+            sleep $((attempt * 10))
+          done
+
+      - name: ruff
+        run: python -m ruff check src tests
+
+      - name: mypy
+        run: python -m mypy src
+
+  test:
+    name: Tests + pipeline smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ffmpeg is required for robust video decode; the synthetic clips the
+      # harness builds rely on it.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg libgl1 libglib2.0-0t64
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            pyproject.toml
+
+      - name: Install project and dev extras
+        run: |
+          python -m pip install --upgrade pip
+          for attempt in 1 2 3; do
+            python -m pip install --retries 5 --timeout 120 \
+              -r requirements.txt -e ".[dev]" && break
+            echo "pip install failed (attempt ${attempt}), retrying..."
+            sleep $((attempt * 10))
+          done
+          python -m pip check || true
+
+      - name: Verify OpenCV 5 is importable
+        run: python -c "import cv2; assert cv2.__version__.startswith('5.'), cv2.__version__; print('opencv', cv2.__version__)"
+
+      # No AWS credentials are configured anywhere in this job. Tests that touch
+      # Bedrock/S3/CloudWatch must mock them; ARGUS_AWS_SINK stays unset so the
+      # pipeline never reaches for a credential chain.
+      - name: Unit and pipeline tests
+        env:
+          ARGUS_REASONER: heuristic
+          AWS_ACCESS_KEY_ID: ""
+          AWS_SECRET_ACCESS_KEY: ""
+          AWS_SESSION_TOKEN: ""
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: python -m pytest -q
+
+      - name: CLI smoke (eval harness is wired up)
+        run: python -m argus.cli eval --help
+
+      - name: Tiny synthetic end-to-end eval
+        run: python -m argus.cli eval --clips 2 --out var/ci-eval
