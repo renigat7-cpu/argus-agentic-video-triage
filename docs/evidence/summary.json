@@ -6,12 +6,12 @@
       "escalate": 6
     },
     "frames_scanned": 1008,
-    "frames_selected": 144,
-    "reduction_ratio": 0.8571,
+    "frames_selected": 54,
+    "reduction_ratio": 0.9464,
     "total_cost_usd": 0.123024,
-    "mean_latency_ms": 8411.34,
+    "mean_latency_ms": 11143.55,
     "escalation_rate": 0.5
   },
-  "wall_clock_s": 135.71,
+  "wall_clock_s": 165.14,
   "reasoner": "heuristic-v1"
 }

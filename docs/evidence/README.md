@@ -5,6 +5,16 @@ This directory is the committed, judge-accessible copy of the artefacts produced
 reproducible from the repository with no private data: the harness generates its own
 labelled synthetic clips.
 
+`decisions.jsonl` is the **judge-visible decision log**: `var/` is gitignored, so this
+file — not the runtime log under `var/` — is the copy that ships with the repository.
+The numbers quoted in `docs/REPORT.md` (including the 8411.34 ms mean latency) come
+from `metrics.json` / `summary.json` in this directory.
+
+**Demo video:** https://www.youtube.com/watch?v=k9v5T1SAocA — walkthrough of triage,
+the escalation queue and a recorded human verdict. Disclosure: the on-camera
+presenter is an AI-generated avatar; the system demonstrated is the code in this
+repository.
+
 ## Files
 
 | File | Meaning |
