@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -78,7 +79,8 @@ def test_handler_reports_an_undecodable_object_without_failing_the_batch(tmp_pat
     assert result["rationale"].startswith("decode_error")
 
 
-def test_handler_without_boto3_still_answers():
+def test_handler_without_boto3_still_answers(monkeypatch):
+    monkeypatch.setitem(sys.modules, "boto3", None)
     lh.set_s3_client(None)
     response = lh.handler(_event(), None)
 

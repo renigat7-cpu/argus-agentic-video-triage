@@ -8,7 +8,7 @@ grows.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import cv2
@@ -76,7 +76,7 @@ def _saliency_map(gray: np.ndarray) -> np.ndarray | None:
         return None
     try:
         if _SALIENT is None:
-            _SALIENT = cv2.saliency.StaticSaliencySpectralResidual_create()
+            _SALIENT = cv2.saliency.StaticSaliencySpectralResidual_create()  # type: ignore[attr-defined]
         out = _SALIENT.computeSaliency(gray)
         _, sal = out if isinstance(out, tuple) else (True, out)
         return np.asarray(sal, dtype=np.float32)
@@ -112,7 +112,7 @@ def optical_flow_mag(prev_gray: np.ndarray, gray: np.ndarray) -> float:
     differencing tends to miss.
     """
 
-    flow = cv2.calcOpticalFlowFarneback(
+    flow = cv2.calcOpticalFlowFarneback(  # type: ignore[call-overload]
         prev_gray, gray, None,
         pyr_scale=0.5, levels=2, winsize=9, iterations=2,
         poly_n=5, poly_sigma=1.1, flags=0,
@@ -157,7 +157,7 @@ def _phash_hasher() -> Any | None:
         return None
     try:
         if _PHASH is None:
-            _PHASH = cv2.img_hash.PHash_create()
+            _PHASH = cv2.img_hash.PHash_create()  # type: ignore[attr-defined]
         return _PHASH
     except Exception:
         return None

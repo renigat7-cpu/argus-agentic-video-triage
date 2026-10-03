@@ -12,7 +12,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -142,9 +142,9 @@ def _staged_path(filename: str | None) -> Path:
 
 @app.post("/api/triage")
 async def triage(
-    file: UploadFile = File(...),
-    location: str = Form("unknown"),
-    reasoner: str | None = Form(None),
+    file: Annotated[UploadFile, File()],
+    location: Annotated[str, Form()] = "unknown",
+    reasoner: Annotated[str | None, Form()] = None,
 ) -> JSONResponse:
     """Triage an uploaded clip and return the decision plus its full trace.
 
@@ -188,8 +188,8 @@ async def triage(
 
 @app.post("/api/triage-batch")
 async def triage_batch(
-    files: list[UploadFile] = File(...),
-    location: str = Form("unknown"),
+    files: Annotated[list[UploadFile], File()],
+    location: Annotated[str, Form()] = "unknown",
 ) -> JSONResponse:
     """Triage several clips and return the batch summary plus per-clip rows."""
 

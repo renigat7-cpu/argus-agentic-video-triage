@@ -443,7 +443,7 @@ class _OpenAIToolLoop:
                 "tool_call_id": r.id,
                 "content": json.dumps(res, ensure_ascii=False, default=str),
             }
-            for r, res in zip(requests, results)
+            for r, res in zip(requests, results, strict=False)
         ]
 
 

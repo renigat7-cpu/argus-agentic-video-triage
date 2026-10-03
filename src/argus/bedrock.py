@@ -169,7 +169,7 @@ class _BedrockToolLoop:
                     "status": "error" if "error" in res else "success",
                 }
             }
-            for r, res in zip(requests, results)
+            for r, res in zip(requests, results, strict=False)
         ]
         return [{"role": "user", "content": blocks}]
 

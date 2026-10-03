@@ -20,7 +20,7 @@ import argparse
 import json
 import math
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -64,14 +64,14 @@ def make_synthetic_clip(
 
     rng = np.random.default_rng(seed)
     events = events or []
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
     writer = cv2.VideoWriter(str(path), fourcc, fps, (width, height))
     if not writer.isOpened():
         raise RuntimeError(f"cannot open writer for {path}")
 
     # Static textured background so edge density is not trivially constant.
     background = np.full((height, width, 3), 60, dtype=np.uint8)
-    background = cv2.add(background, rng.integers(0, 25, (height, width, 3), dtype=np.uint8))
+    background = cv2.add(background, rng.integers(0, 25, (height, width, 3), dtype=np.uint8))  # type: ignore[assignment]
     for _ in range(40):
         x1, y1 = rng.integers(0, width - 40, 2)
         x2, y2 = x1 + rng.integers(10, 40), y1 + rng.integers(10, 40)
@@ -89,7 +89,7 @@ def make_synthetic_clip(
                 y = int(height * 0.62 + 14 * math.sin(t * 3.0))
                 cv2.rectangle(frame, (x, y), (x + 26, y + 34), (30, 220, 240), -1)
                 cv2.circle(frame, (x + 13, y + 17), 9, (20, 20, 220), -1)
-        frame = cv2.GaussianBlur(frame, (3, 3), 0)
+        frame = cv2.GaussianBlur(frame, (3, 3), 0)  # type: ignore[assignment]
         writer.write(frame)
 
     writer.release()
@@ -177,13 +177,13 @@ def evaluate(
             }
         )
 
-    tp = sum(1 for t, r in zip(truths, results)
+    tp = sum(1 for t, r in zip(truths, results, strict=False)
              if t.has_event and r.decision == "confirm")
-    fn = sum(1 for t, r in zip(truths, results)
+    fn = sum(1 for t, r in zip(truths, results, strict=False)
              if t.has_event and r.decision != "confirm")
-    fp = sum(1 for t, r in zip(truths, results)
+    fp = sum(1 for t, r in zip(truths, results, strict=False)
              if not t.has_event and r.decision == "confirm")
-    tn = sum(1 for t, r in zip(truths, results)
+    tn = sum(1 for t, r in zip(truths, results, strict=False)
              if not t.has_event and r.decision != "confirm")
 
     positives = sum(1 for t in truths if t.has_event)
@@ -193,9 +193,9 @@ def evaluate(
     def _motion_only(r: TriageResult) -> bool:
         return any(rule["rule"] == "motion_present" and rule["passed"] for rule in r.rules)
 
-    b_tp = sum(1 for t, r in zip(truths, results) if t.has_event and _motion_only(r))
-    b_fn = sum(1 for t, r in zip(truths, results) if t.has_event and not _motion_only(r))
-    b_fp = sum(1 for t, r in zip(truths, results) if not t.has_event and _motion_only(r))
+    b_tp = sum(1 for t, r in zip(truths, results, strict=False) if t.has_event and _motion_only(r))
+    b_fn = sum(1 for t, r in zip(truths, results, strict=False) if t.has_event and not _motion_only(r))
+    b_fp = sum(1 for t, r in zip(truths, results, strict=False) if not t.has_event and _motion_only(r))
     b_precision = _safe_div(b_tp, b_tp + b_fp)
     b_recall = _safe_div(b_tp, b_tp + b_fn)
 

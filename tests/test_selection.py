@@ -32,7 +32,7 @@ def test_diversity_prevents_adjacent_burst():
 
     assert len(chosen) <= cfg.top_k
     times = sorted(c.signals.timestamp_s for c in chosen)
-    for a, b in zip(times, times[1:]):
+    for a, b in zip(times, times[1:], strict=False):
         assert (b - a) * 1000 >= cfg.diversity_ms
     assert diag["selected"] == len(chosen)
 
