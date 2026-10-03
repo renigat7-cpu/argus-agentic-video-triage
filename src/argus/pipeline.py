@@ -3,6 +3,11 @@
 One :class:`TriageResult` per clip, always accompanied by the diagnostics the
 evaluation harness needs (frames scanned, frames selected, cost, latency) so
 quality and cost can be traded off explicitly rather than implicitly.
+
+The pipeline is also the failure boundary. A clip that cannot be decoded and a
+reasoner that blows up both produce a *recorded decision* that escalates to a
+human, never an exception out of :meth:`TriagePipeline.triage`: a triage system
+that crashes on bad input has silently dropped a stream.
 """
 
 from __future__ import annotations
@@ -13,11 +18,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .agent import Reasoner, build_reasoner
+from .agent import HeuristicReasoner, Reasoner, build_reasoner
+from .aws_store import AwsSink, sink_enabled
 from .config import PipelineConfig
+from .human import EscalationQueue
 from .ingest import ClipMeta, extract_signals
 from .observability import DecisionRecord, Recorder, ToolTrace
-from .policy import Evidence, confidence_label
+from .policy import Evidence, PolicyDecision, confidence_label
 from .selection import Candidate, select_frames
 
 
@@ -39,6 +46,8 @@ class TriageResult:
     cost_usd: float = 0.0
     latency_ms: float = 0.0
     selection: list[dict[str, Any]] = field(default_factory=list)
+    error: str | None = None
+    """Set when the clip could not be decoded or the reasoner had to degrade."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +65,7 @@ class TriageResult:
             "cost_usd": round(self.cost_usd, 8),
             "latency_ms": round(self.latency_ms, 2),
             "selection": self.selection,
+            "error": self.error,
         }
 
 
@@ -68,72 +78,23 @@ class TriagePipeline:
         reasoner: Reasoner | None = None,
         reasoner_backend: str = "heuristic",
         recorder: Recorder | None = None,
+        sink: AwsSink | None = None,
     ) -> None:
         self.cfg = cfg or PipelineConfig()
         self.reasoner = reasoner or build_reasoner(self.cfg.policy, reasoner_backend)
-        self.recorder = recorder or Recorder(self.cfg)
+        self.sink = sink if sink is not None else (AwsSink() if sink_enabled() else None)
+        self.recorder = recorder or Recorder(self.cfg, sink=self.sink)
+        self.escalations = EscalationQueue(self.cfg)
 
-    def triage(
-        self, clip: str | Path, location: str = "unknown", max_frames: int | None = None
-    ) -> TriageResult:
-        """Triage a single clip and persist the decision record."""
+    # ------------------------------------------------------------- internals
 
-        started = time.perf_counter()
-        run_id = uuid.uuid4().hex[:12]
-
-        signals, meta = extract_signals(clip, self.cfg.selection, max_frames=max_frames)
-        candidates, diag = select_frames(signals, self.cfg.selection)
-        chosen: list[Candidate] = [c for c in candidates if c.selected]
-
-        evidence = Evidence(
-            frames=[c.signals for c in chosen],
-            clip_duration_s=meta.duration_s,
-            fps=meta.fps,
-            width=meta.width,
-            height=meta.height,
-            location=location,
-        )
-
-        trace = ToolTrace()
-        decision = self.reasoner.reason(evidence, trace)
-
-        latency_ms = (time.perf_counter() - started) * 1000.0
-        cost = (
-            self.cfg.cost.frame_cost(len(signals))
-            + self.cfg.cost.reasoning_call_cost(len(trace.calls))
-        )
-
-        result = TriageResult(
-            run_id=run_id,
-            clip=str(clip),
-            decision=decision.decision,
-            confidence=decision.confidence,
-            confidence_label=confidence_label(decision.confidence),
-            rationale=decision.rationale,
-            rules=[
-                {
-                    "rule": r.rule,
-                    "passed": r.passed,
-                    "confidence": r.confidence,
-                    "rationale": r.rationale,
-                }
-                for r in decision.rules
-            ],
-            tool_calls=trace.to_list(),
-            n_frames_scanned=len(signals),
-            n_frames_selected=len(chosen),
-            reduction_ratio=float(diag.get("reduction_ratio", 0.0)),
-            cost_usd=cost,
-            latency_ms=latency_ms,
-            selection=[
-                {"t": c.signals.timestamp_s, "score": c.score} for c in chosen
-            ],
-        )
+    def _record(self, result: TriageResult) -> TriageResult:
+        """Persist one decision and route escalations to the human queue."""
 
         self.recorder.record_decision(
             DecisionRecord(
-                run_id=run_id,
-                clip=str(clip),
+                run_id=result.run_id,
+                clip=result.clip,
                 decision=result.decision,
                 confidence=result.confidence,
                 confidence_label=result.confidence_label,
@@ -146,7 +107,116 @@ class TriagePipeline:
                 latency_ms=result.latency_ms,
             )
         )
+        if result.decision == "escalate":
+            self.escalations.enqueue(result.to_dict())
         return result
+
+    def _decode_failure(
+        self, clip: str | Path, run_id: str, started: float, exc: BaseException, trace: ToolTrace
+    ) -> TriageResult:
+        """An undecodable clip is an escalation, not an exception."""
+
+        with trace.call("decode_error", error=type(exc).__name__):
+            pass
+        return self._record(
+            TriageResult(
+                run_id=run_id,
+                clip=str(clip),
+                decision="escalate",
+                confidence=0.0,
+                confidence_label="low",
+                rationale=f"decode_error: {exc}",
+                tool_calls=trace.to_list(),
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+                error=str(exc),
+            )
+        )
+
+    def _reason(self, evidence: Evidence, trace: ToolTrace) -> PolicyDecision:
+        """Reason, degrading to the heuristic reasoner rather than failing."""
+
+        try:
+            return self.reasoner.reason(evidence, trace)
+        except Exception as exc:  # noqa: BLE001 — the reasoners already fall back
+            with trace.call("reasoner_error", reason=type(exc).__name__):
+                pass
+            decision = HeuristicReasoner(self.cfg.policy).reason(evidence, trace)
+            return PolicyDecision(
+                decision=decision.decision,
+                confidence=decision.confidence,
+                rules=decision.rules,
+                rationale=f"reasoner_fallback: {decision.rationale}",
+            )
+
+    # ------------------------------------------------------------------- api
+
+    def triage(
+        self, clip: str | Path, location: str = "unknown", max_frames: int | None = None
+    ) -> TriageResult:
+        """Triage a single clip and persist the decision record."""
+
+        started = time.perf_counter()
+        run_id = uuid.uuid4().hex[:12]
+        trace = ToolTrace()
+
+        try:
+            signals, meta = extract_signals(clip, self.cfg.selection, max_frames=max_frames)
+        except Exception as exc:  # RuntimeError for an unopenable file, cv2.error for junk
+            return self._decode_failure(clip, run_id, started, exc, trace)
+
+        if not signals:
+            return self._decode_failure(
+                clip, run_id, started, RuntimeError("no frames decoded"), trace
+            )
+
+        candidates, diag = select_frames(signals, self.cfg.selection)
+        chosen: list[Candidate] = [c for c in candidates if c.selected]
+
+        evidence = Evidence(
+            frames=[c.signals for c in chosen],
+            clip_duration_s=meta.duration_s,
+            fps=meta.fps,
+            width=meta.width,
+            height=meta.height,
+            location=location,
+        )
+
+        decision = self._reason(evidence, trace)
+
+        latency_ms = (time.perf_counter() - started) * 1000.0
+        cost = (
+            self.cfg.cost.frame_cost(len(signals))
+            + self.cfg.cost.reasoning_call_cost(len(trace.calls))
+        )
+
+        return self._record(
+            TriageResult(
+                run_id=run_id,
+                clip=str(clip),
+                decision=decision.decision,
+                confidence=decision.confidence,
+                confidence_label=confidence_label(decision.confidence),
+                rationale=decision.rationale,
+                rules=[
+                    {
+                        "rule": r.rule,
+                        "passed": r.passed,
+                        "confidence": r.confidence,
+                        "rationale": r.rationale,
+                    }
+                    for r in decision.rules
+                ],
+                tool_calls=trace.to_list(),
+                n_frames_scanned=len(signals),
+                n_frames_selected=len(chosen),
+                reduction_ratio=float(diag.get("reduction_ratio", 0.0)),
+                cost_usd=cost,
+                latency_ms=latency_ms,
+                selection=[
+                    {"t": c.signals.timestamp_s, "score": c.score} for c in chosen
+                ],
+            )
+        )
 
     def triage_many(
         self, clips: list[str | Path], location: str = "unknown"

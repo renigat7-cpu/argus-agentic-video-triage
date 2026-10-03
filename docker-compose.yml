@@ -4,12 +4,30 @@ services:
     image: argus-triage:0.1.0
     ports:
       - "8080:8080"
+    # Credentials and AWS switches come from .env (copy .env.example). Marked
+    # optional so `docker compose up` still works on a clean checkout without one.
+    env_file:
+      - path: .env
+        required: false
     environment:
       ARGUS_OUT_DIR: /data
+      # read_only: true below means nothing outside the mounted volume and /tmp
+      # is writable, so uploads have to be staged on the volume.
+      ARGUS_UPLOAD_DIR: /data/uploads
       ARGUS_REASONER: ${ARGUS_REASONER:-heuristic}
       ARGUS_LLM_BASE_URL: ${ARGUS_LLM_BASE_URL:-}
       ARGUS_LLM_MODEL: ${ARGUS_LLM_MODEL:-gpt-4o-mini}
       ARGUS_LLM_KEY: ${ARGUS_LLM_KEY:-}
+      # AWS: Bedrock reasoner, S3 decision log, CloudWatch metrics. All optional —
+      # with these unset the service stays fully local (heuristic reasoner,
+      # decisions written to /data only).
+      ARGUS_AGENT_MAX_STEPS: ${ARGUS_AGENT_MAX_STEPS:-6}
+      ARGUS_AWS_REGION: ${ARGUS_AWS_REGION:-us-east-1}
+      ARGUS_AWS_SINK: ${ARGUS_AWS_SINK:-}
+      ARGUS_S3_BUCKET: ${ARGUS_S3_BUCKET:-}
+      ARGUS_S3_PREFIX: ${ARGUS_S3_PREFIX:-}
+      ARGUS_CW_NAMESPACE: ${ARGUS_CW_NAMESPACE:-Argus}
+      ARGUS_BEDROCK_MODEL_ID: ${ARGUS_BEDROCK_MODEL_ID:-}
     volumes:
       - ./var:/data
     restart: unless-stopped

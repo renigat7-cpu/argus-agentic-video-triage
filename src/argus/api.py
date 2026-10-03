@@ -8,6 +8,7 @@ tool calls, and the cost, so a judge can audit a decision without logs.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -16,8 +17,11 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
+from .agent import TOOL_NAMES, max_steps
 from .config import load_config
+from .human import VERDICTS
 from .ingest import probe
 from .pipeline import TriagePipeline, summarize
 
@@ -25,7 +29,7 @@ WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web"
 
 app = FastAPI(
     title="Argus - Agentic Video Triage",
-    version="0.1.0",
+    version="0.2.0",
     description=(
         "OpenCV 5 frame selection plus a tool-using agent that verifies, dismisses, "
         "or escalates candidate events, with a decision trace attached to every answer."
@@ -47,6 +51,78 @@ def healthz() -> dict[str, Any]:
     return {"ok": True, "reasoner": _pipeline.reasoner.name, "opencv": _opencv_version()}
 
 
+class VerdictBody(BaseModel):
+    """Reviewer answer to one escalation."""
+
+    run_id: str
+    verdict: str
+    reviewer: str | None = None
+    note: str | None = None
+
+
+@app.get("/api/escalations")
+def escalations(status: str | None = "open", limit: int = 100) -> dict[str, Any]:
+    """The human queue: every open escalation, or every state when status=all."""
+
+    queue = _pipeline.escalations
+    wanted = None if status in (None, "", "all") else status
+    rows = queue.list(wanted)
+    return {
+        "count": len(rows[:limit]),
+        "total": len(rows),
+        "status": wanted,
+        "escalations": rows[:limit],
+    }
+
+
+@app.post("/api/verdict")
+def verdict(body: VerdictBody) -> JSONResponse:
+    """Close an escalation: approve, reject, or ask for more evidence."""
+
+    try:
+        row = _pipeline.escalations.verdict(
+            body.run_id,
+            body.verdict,
+            reviewer=body.reviewer or "unknown",
+            note=body.note or "",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(row, status_code=201)
+
+
+@app.get("/api/capabilities")
+def capabilities() -> dict[str, Any]:
+    """What this deployment can actually do - asked by every judge."""
+
+    from .aws_store import boto3_available, sink_enabled
+    from .bedrock import bedrock_model, bedrock_region
+
+    sink = _pipeline.sink
+    return {
+        "reasoner": _pipeline.reasoner.name,
+        "reasoner_backend": os.environ.get("ARGUS_REASONER", "heuristic"),
+        "agent_max_steps": max_steps(),
+        "tools": list(TOOL_NAMES),
+        "human_loop": True,
+        "verdicts": list(VERDICTS),
+        "opencv": _opencv_version(),
+        "bedrock": {
+            "model": bedrock_model(),
+            "region": bedrock_region(),
+            "sdk_available": boto3_available(),
+        },
+        "aws_sink": {
+            "enabled": sink_enabled(),
+            "available": bool(sink.available) if sink is not None else False,
+            "bucket": getattr(sink, "bucket", ""),
+            "prefix": getattr(sink, "prefix", ""),
+            "cloudwatch_namespace": getattr(sink, "namespace", ""),
+            "sdk_available": boto3_available(),
+        },
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     page = WEB_DIR / "templates" / "index.html"
@@ -55,24 +131,45 @@ def index() -> HTMLResponse:
     return HTMLResponse("<h1>Argus</h1><p>UI not installed.</p>")
 
 
+def _staged_path(filename: str | None) -> Path:
+    """Temp path that keeps the uploaded name, so the decision log stays readable."""
+
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", Path(filename or "clip.mp4").name)
+    safe = safe.lstrip(".") or "clip.mp4"
+    suffix = Path(safe).suffix or ".mp4"
+    return Path(tempfile.mkdtemp(prefix="argus-")) / f"{Path(safe).stem}{suffix}"
+
+
 @app.post("/api/triage")
 async def triage(
     file: UploadFile = File(...),
     location: str = Form("unknown"),
     reasoner: str | None = Form(None),
 ) -> JSONResponse:
-    """Triage an uploaded clip and return the decision plus its full trace."""
+    """Triage an uploaded clip and return the decision plus its full trace.
 
-    suffix = Path(file.filename or "clip.mp4").suffix or ".mp4"
-    tmp = Path(tempfile.mkdtemp(prefix="argus-")) / f"clip{suffix}"
+    An undecodable upload is answered with 200 and an ``escalate`` decision
+    carrying ``rationale: decode_error: ...``: the reviewer needs to see the
+    failure in the queue, not a 400 in the access log.
+    """
+
+    tmp = _staged_path(file.filename)
     try:
         with tmp.open("wb") as fh:
             shutil.copyfileobj(file.file, fh)
 
+        meta_payload: dict[str, Any] | None = None
         try:
             meta = probe(tmp)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            meta_payload = {
+                "width": meta.width,
+                "height": meta.height,
+                "fps": meta.fps,
+                "n_frames": meta.n_frames,
+                "duration_s": round(meta.duration_s, 3),
+            }
+        except RuntimeError:
+            meta_payload = None
 
         pipe = (
             _pipeline
@@ -82,13 +179,8 @@ async def triage(
         result = pipe.triage(tmp, location=location)
         payload = result.to_dict()
         payload["clip"] = file.filename
-        payload["meta"] = {
-            "width": meta.width,
-            "height": meta.height,
-            "fps": meta.fps,
-            "n_frames": meta.n_frames,
-            "duration_s": round(meta.duration_s, 3),
-        }
+        if meta_payload is not None:
+            payload["meta"] = meta_payload
         return JSONResponse(payload)
     finally:
         shutil.rmtree(tmp.parent, ignore_errors=True)

@@ -3,7 +3,14 @@
 Naive top-K by motion is the obvious approach and it fails in a specific,
 reproducible way: one busy burst produces K adjacent frames and the rest of the
 clip is never inspected. ``select_frames`` therefore scores cheaply, then applies
-a temporal diversity constraint before taking the top-K.
+two diversity constraints before taking the top-K:
+
+* **temporal** - never two frames closer than ``diversity_ms``;
+* **visual** (OpenCV 5) - never two frames whose ``cv2.img_hash`` perceptual
+  hashes are within ``PHASH_MAX_DISTANCE`` bits of each other while also being
+  close in time. A static scene produces high-confidence motion in every frame
+  of a burst; the perceptual hash is what tells those frames apart from genuinely
+  different moments of the same clip.
 """
 
 from __future__ import annotations
@@ -13,6 +20,12 @@ from typing import Iterable, Sequence
 
 from .config import SelectionConfig
 from .signals import FrameSignals
+
+PHASH_MAX_DISTANCE = 6
+"""Hamming distance under which two 64-bit perceptual hashes are near-duplicates."""
+
+PHASH_WINDOW_MS = 3000
+"""Near-duplicate hashes only count as redundant when this close in time."""
 
 
 @dataclass(frozen=True)
@@ -35,6 +48,26 @@ def combine_score(s: FrameSignals, cfg: SelectionConfig) -> float:
         + cfg.saliency_weight * s.saliency
         + cfg.color_weight * s.color_anomaly
     )
+
+
+def hamming(a: str, b: str) -> int:
+    """Bit distance between two hex perceptual hashes, or -1 if incomparable."""
+
+    if not a or not b or len(a) != len(b):
+        return -1
+    try:
+        return bin(int(a, 16) ^ int(b, 16)).count("1")
+    except ValueError:
+        return -1
+
+
+def is_near_duplicate(a: FrameSignals, b: FrameSignals) -> bool:
+    """True when two frames look the same *and* were sampled close together."""
+
+    distance = hamming(a.phash, b.phash)
+    if distance < 0 or distance > PHASH_MAX_DISTANCE:
+        return False
+    return abs(a.timestamp_s - b.timestamp_s) * 1000.0 < PHASH_WINDOW_MS
 
 
 def _motion_floor(signals: Sequence[FrameSignals], percentile: float) -> float:
@@ -77,7 +110,9 @@ def select_frames(
     )
 
     # Temporal diversity: never take two frames closer than diversity_ms.
+    # Visual diversity (OpenCV 5 img_hash): never take a near-duplicate frame.
     chosen: list[Candidate] = []
+    duplicates: set[tuple[int, float]] = set()
     for cand in ranked:
         if len(chosen) >= cfg.top_k:
             break
@@ -87,6 +122,9 @@ def select_frames(
             for c in chosen
         ):
             continue
+        if any(is_near_duplicate(cand.signals, c.signals) for c in chosen):
+            duplicates.add((cand.signals.index, cand.signals.timestamp_s))
+            continue
         chosen.append(cand)
 
     chosen_set = {(c.signals.index, c.signals.timestamp_s) for c in chosen}
@@ -95,16 +133,28 @@ def select_frames(
         key = (c.signals.index, c.signals.timestamp_s)
         if key in chosen_set:
             final.append(Candidate(c.signals, c.score, selected=True, rejected_reason=""))
-        else:
-            reason = c.rejected_reason or (
-                "diversity-constraint" if not c.rejected_reason else c.rejected_reason
+        elif c.rejected_reason:
+            final.append(
+                Candidate(c.signals, c.score, selected=False, rejected_reason=c.rejected_reason)
             )
-            final.append(Candidate(c.signals, c.score, selected=False, rejected_reason=reason))
+        elif key in duplicates:
+            final.append(
+                Candidate(
+                    c.signals, c.score, selected=False, rejected_reason="phash-near-duplicate"
+                )
+            )
+        else:
+            final.append(
+                Candidate(
+                    c.signals, c.score, selected=False, rejected_reason="diversity-constraint"
+                )
+            )
 
     diag = {
         "scored": float(len(scored)),
         "floor": round(floor, 6),
         "selected": float(len(chosen)),
+        "phash_duplicates": float(len(duplicates)),
         "reduction_ratio": round(1.0 - (len(chosen) / max(1, len(scored))), 6),
     }
     return final, diag

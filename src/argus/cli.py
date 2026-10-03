@@ -91,7 +91,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="argus", description="Agentic video triage")
     ap.add_argument("--config", default=None, help="JSON config override")
-    ap.add_argument("--reasoner", default="heuristic", choices=["heuristic", "llm"])
+    ap.add_argument("--reasoner", default="heuristic", choices=["heuristic", "llm", "bedrock"])
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("probe", help="print clip metadata")

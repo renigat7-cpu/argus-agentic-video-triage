@@ -12,9 +12,12 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 
 from .config import PipelineConfig
+
+if TYPE_CHECKING:  # keeps boto3 out of the import graph entirely
+    from .aws_store import AwsSink
 
 
 def _utc() -> str:
@@ -69,17 +72,25 @@ class DecisionRecord:
 
 
 class Recorder:
-    """Append-only JSONL recorder for decisions and runs."""
+    """Append-only JSONL recorder for decisions and runs.
 
-    def __init__(self, cfg: PipelineConfig) -> None:
+    ``sink`` is an optional :class:`~argus.aws_store.AwsSink` mirror. The local
+    file is always written first and unconditionally: the cloud copy is a
+    convenience, never the reason a decision is recorded.
+    """
+
+    def __init__(self, cfg: PipelineConfig, sink: AwsSink | None = None) -> None:
         cfg.ensure_dirs()
         self.cfg = cfg
+        self.sink = sink
         self.decisions_path = cfg.out_dir / cfg.decision_log
         self.runs_path = cfg.out_dir / cfg.run_log
 
     def record_decision(self, rec: DecisionRecord) -> None:
         with self.decisions_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec.to_dict(), ensure_ascii=False) + "\n")
+        if self.sink is not None:
+            self.sink.put_decision(rec.to_dict())
 
     def record_run(self, payload: dict[str, Any]) -> None:
         with self.runs_path.open("a", encoding="utf-8") as fh:

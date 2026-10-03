@@ -1,27 +1,50 @@
 """The reasoning agent and its tools.
 
-Two reasoners are provided and share one contract:
+Three reasoners are provided and share one contract:
 
 * :class:`HeuristicReasoner` - deterministic, zero-dependency, fully
   reproducible. This is the default so evaluation numbers are meaningful.
-* :class:`LLMReasoner` - optional tool-calling model backend, used when a
-  compatible endpoint is configured. It may only act through the same typed
-  tools, so its behaviour stays auditable.
+* :class:`LLMReasoner` - tool-calling model backend over an OpenAI-compatible
+  endpoint.
+* :class:`BedrockReasoner` (in :mod:`argus.bedrock`) - the same tool loop driven
+  by the Bedrock Converse API.
 
-Both return the same :class:`PolicyDecision` and both are routed through the
-same confidence gates, so swapping backends does not change escalation policy.
+Both model backends run the *same* bounded tool loop (:func:`run_tool_loop`):
+the model chooses which of the typed tools to call, results are fed back, steps
+are capped, every step is traced, and any failure falls back to the heuristic
+reasoner so a decision is always produced.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .config import PolicyConfig
 from .observability import ToolTrace
 from .policy import Evidence, PolicyDecision, confidence_label, evaluate_evidence
+
+DEFAULT_MAX_STEPS = 5
+
+
+def max_steps(default: int = DEFAULT_MAX_STEPS) -> int:
+    """``ARGUS_AGENT_MAX_STEPS``, clamped to at least one step."""
+
+    raw = os.environ.get("ARGUS_AGENT_MAX_STEPS", "")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def fallback_reasoner(cfg: PolicyConfig) -> HeuristicReasoner:
+    """The reasoner every backend degrades to."""
+
+    return HeuristicReasoner(cfg)
 
 
 class Reasoner(Protocol):
@@ -88,6 +111,154 @@ class ToolRegistry:
             }
 
 
+#: The complete tool surface. Model backends may not invent tools.
+TOOL_NAMES: tuple[str, ...] = ("clip_summary", "motion_profile", "timeline", "gate_check")
+
+TOOL_DESCRIPTIONS: dict[str, str] = {
+    "clip_summary": "Container facts: duration, fps, resolution, location, frame count.",
+    "motion_profile": "Peak motion, optical flow, saliency and mean luminance of the clip.",
+    "timeline": "Per-frame motion/flow/saliency over the evidence timeline.",
+    "gate_check": "Run the policy gates now and report which ones passed.",
+}
+
+
+def tool_functions_openai() -> list[dict[str, Any]]:
+    """The four tools as OpenAI-compatible function definitions."""
+
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": TOOL_DESCRIPTIONS[name],
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        }
+        for name in TOOL_NAMES
+    ]
+
+
+def tool_config_bedrock() -> dict[str, Any]:
+    """The four tools as a Bedrock ``toolConfig`` block."""
+
+    return {
+        "tools": [
+            {
+                "toolSpec": {
+                    "name": name,
+                    "description": TOOL_DESCRIPTIONS[name],
+                    "inputSchema": {"json": {"type": "object", "properties": {}}},
+                }
+            }
+            for name in TOOL_NAMES
+        ]
+    }
+
+
+@dataclass(frozen=True)
+class ToolRequest:
+    """A model-requested tool call, normalised across API dialects."""
+
+    id: str
+    name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+
+
+def dispatch_tool(
+    registry: ToolRegistry, evidence: Evidence, request: ToolRequest
+) -> dict[str, Any]:
+    """Execute a requested tool. Failures are returned as data, never raised."""
+
+    if request.name not in TOOL_NAMES:
+        return {"error": f"unknown tool: {request.name}"}
+    method = getattr(registry, request.name, None)
+    if method is None:
+        return {"error": f"unknown tool: {request.name}"}
+    try:
+        return {"result": method(evidence)}
+    except Exception as exc:  # noqa: BLE001 — a tool failure is model-visible data
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+class ToolLoopBackend(Protocol):
+    """Wire-format adapter: LLM chat messages and Bedrock messages are different."""
+
+    def respond(self, messages: list[Any], step: int) -> tuple[Any, list[ToolRequest], str]: ...
+
+    def tool_result(
+        self, requests: list[ToolRequest], results: list[dict[str, Any]]
+    ) -> list[Any]: ...
+
+
+def run_tool_loop(
+    evidence: Evidence,
+    trace: ToolTrace,
+    backend: ToolLoopBackend,
+    max_iterations: int | None = None,
+    initial: list[Any] | None = None,
+) -> str:
+    """Bounded model ⇄ tool loop shared by every model backend.
+
+    The model is free to call any of the four typed tools, zero or more times;
+    results are fed back until it produces text. Each iteration emits a
+    ``<backend>_step`` trace call and each tool call is recorded by the registry.
+    Raises when the model never returns usable text, so the caller can fall back.
+    """
+
+    registry = ToolRegistry(trace)
+    messages: list[Any] = list(initial or [])
+    steps = max_steps() if max_iterations is None else max(1, max_iterations)
+
+    for step in range(1, steps + 1):
+        assistant, requests, final_text = backend.respond(messages, step)
+        if assistant is not None:
+            messages.append(assistant)
+        if not requests:
+            if final_text.strip():
+                return final_text
+            raise RuntimeError(f"model produced no text after {step} step(s)")
+        results = [dispatch_tool(registry, evidence, r) for r in requests]
+        messages.extend(backend.tool_result(requests, results))
+
+    raise RuntimeError(f"tool loop exceeded {steps} steps without a final answer")
+
+
+def parse_final_json(text: str) -> dict[str, Any]:
+    """Extract the ``{"confidence", "rationale"}`` object from model text."""
+
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("no JSON object in model response")
+    parsed = json.loads(text[start : end + 1])
+    if not isinstance(parsed, dict) or "confidence" not in parsed:
+        raise ValueError("model response has no confidence field")
+    return parsed
+
+
+def scored_from_model(evidence: Evidence, cfg: PolicyConfig, text: str) -> PolicyDecision:
+    """Parse a model answer and route it through the shared confidence gates."""
+
+    parsed = parse_final_json(text)
+    confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0.0))))
+    scored = PolicyDecision(
+        decision="candidate",
+        confidence=round(confidence, 4),
+        rules=evaluate_evidence(evidence).rules,
+        rationale=str(parsed.get("rationale", ""))[:400],
+    )
+    return apply_gates(scored, cfg)
+
+
+def fallback(
+    evidence: Evidence, trace: ToolTrace, cfg: PolicyConfig, tag: str, exc: BaseException
+) -> PolicyDecision:
+    """Record why we degraded, then produce a heuristic decision anyway."""
+
+    with trace.call(f"{tag}_fallback", reason=type(exc).__name__):
+        print(f"argus.agent: {tag} failed, falling back to heuristic ({exc})", file=sys.stderr)
+    return fallback_reasoner(cfg).reason(evidence, trace)
+
+
 def apply_gates(decision: PolicyDecision, cfg: PolicyConfig) -> PolicyDecision:
     """Convert a scored candidate into confirm/dismiss/escalate.
 
@@ -146,8 +317,9 @@ class HeuristicReasoner:
 
 
 LLM_SYSTEM_PROMPT = """You are a video-triage reasoner for a security camera system.
-You are given bounded numeric facts about one evidence bundle, gathered by tools.
-Judge the evidence against these gates: motion_present, salient_subject,
+You have tools that report bounded numeric facts about one evidence bundle.
+Call the tools you need - clip_summary, motion_profile, timeline, gate_check -
+then judge the evidence against these gates: motion_present, salient_subject,
 illumination_usable, temporal_persistence.
 
 Rules:
@@ -178,56 +350,118 @@ class LLMReasoner:
         return (self.base_url or "https://api.openai.com/v1").rstrip("/"), key
 
     def reason(self, evidence: Evidence, trace: ToolTrace) -> PolicyDecision:
-        import httpx
-
-        base, key = self._endpoint()
         tools = ToolRegistry(trace)
-        summary = tools.clip_summary(evidence)
-        profile = tools.motion_profile(evidence)
-        timeline = tools.timeline(evidence)
+        try:
+            facts = {
+                "clip": tools.clip_summary(evidence),
+                "motion": tools.motion_profile(evidence),
+                "timeline": tools.timeline(evidence),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return fallback(evidence, trace, self.cfg, "llm", exc)
 
-        facts = {"clip": summary, "motion": profile, "timeline": timeline}
         prompt = (
             "Evidence bundle facts:\n"
             + json.dumps(facts, ensure_ascii=False)
-            + "\n\nJudge against the gates. Return JSON only."
+            + "\n\nCall the tools you still need, then judge against the gates. "
+            "Return JSON only."
         )
+        backend = _OpenAIToolLoop(self, prompt, trace)
+        try:
+            text = run_tool_loop(evidence, trace, backend, initial=backend.initial())
+        except Exception as exc:  # noqa: BLE001 — never fail a decision on the model
+            return fallback(evidence, trace, self.cfg, "llm", exc)
+        try:
+            return scored_from_model(evidence, self.cfg, text)
+        except Exception as exc:  # noqa: BLE001
+            return fallback(evidence, trace, self.cfg, "llm", exc)
 
-        with trace.call("llm_reason", model=self.model):
+
+class _OpenAIToolLoop:
+    """Adapts ``/chat/completions`` to :func:`run_tool_loop`."""
+
+    def __init__(self, owner: LLMReasoner, prompt: str, trace: ToolTrace) -> None:
+        self.owner = owner
+        self.trace = trace
+        self.system = {"role": "system", "content": LLM_SYSTEM_PROMPT}
+        self.first = {"role": "user", "content": prompt}
+
+    def initial(self) -> list[dict[str, Any]]:
+        return [self.first]
+
+    def respond(
+        self, messages: list[dict[str, Any]], step: int
+    ) -> tuple[Any, list[ToolRequest], str]:
+        import httpx
+
+        owner = self.owner
+        base, key = owner._endpoint()
+        with self.trace.call("llm_step", step=step, model=owner.model):
             resp = httpx.post(
                 f"{base}/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
                 json={
-                    "model": self.model,
+                    "model": owner.model,
                     "temperature": 0.0,
-                    "max_tokens": 200,
-                    "messages": [
-                        {"role": "system", "content": LLM_SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt},
-                    ],
+                    "max_tokens": 400,
+                    "tools": tool_functions_openai(),
+                    "tool_choice": "auto",
+                    "messages": [self.system, *messages],
                 },
                 timeout=30.0,
             )
             resp.raise_for_status()
-            self.calls += 1
-            content = resp.json()["choices"][0]["message"]["content"].strip()
+        owner.calls += 1
+        message = (resp.json().get("choices") or [{}])[0].get("message", {})
+        requests = [
+            ToolRequest(
+                id=str(c.get("id") or f"call_{step}_{i}"),
+                name=str((c.get("function") or {}).get("name") or ""),
+                arguments=(c.get("function") or {}).get("arguments") or {},
+            )
+            for i, c in enumerate(message.get("tool_calls") or [])
+        ]
+        assistant: dict[str, Any] = {"role": "assistant", "content": message.get("content") or ""}
+        if requests:
+            assistant["tool_calls"] = [
+                {
+                    "id": r.id,
+                    "type": "function",
+                    "function": {"name": r.name, "arguments": r.arguments},
+                }
+                for r in requests
+            ]
+        return assistant, requests, str(message.get("content") or "")
 
-        parsed = json.loads(content[content.find("{"): content.rfind("}") + 1])
-        confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0.0))))
-        scored = PolicyDecision(
-            decision="candidate",
-            confidence=round(confidence, 4),
-            rules=evaluate_evidence(evidence).rules,
-            rationale=str(parsed.get("rationale", ""))[:400],
-        )
-        return apply_gates(scored, self.cfg)
+    def tool_result(
+        self, requests: list[ToolRequest], results: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        # One tool message per call id, as the OpenAI wire format requires.
+        return [
+            {
+                "role": "tool",
+                "tool_call_id": r.id,
+                "content": json.dumps(res, ensure_ascii=False, default=str),
+            }
+            for r, res in zip(requests, results)
+        ]
 
 
 def build_reasoner(cfg: PolicyConfig, backend: str = "heuristic") -> Reasoner:
     """Factory so the backend is a config value rather than a code path."""
 
-    if backend == "llm":
+    name = (backend or "heuristic").strip().lower()
+    if name == "llm":
         return LLMReasoner(cfg)
+    if name == "bedrock":
+        from .bedrock import BedrockReasoner
+
+        return BedrockReasoner(cfg)
+    if name != "heuristic":
+        print(
+            f"argus.agent: unknown reasoner backend {backend!r}, using heuristic-v1",
+            file=sys.stderr,
+        )
     return HeuristicReasoner(cfg)
 
 
@@ -235,8 +469,17 @@ __all__ = [
     "HeuristicReasoner",
     "LLMReasoner",
     "Reasoner",
+    "TOOL_NAMES",
     "ToolRegistry",
+    "ToolRequest",
     "apply_gates",
     "build_reasoner",
     "confidence_label",
+    "dispatch_tool",
+    "max_steps",
+    "parse_final_json",
+    "run_tool_loop",
+    "scored_from_model",
+    "tool_config_bedrock",
+    "tool_functions_openai",
 ]

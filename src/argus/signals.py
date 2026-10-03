@@ -39,6 +39,12 @@ class FrameSignals:
     luma: float
     """Mean luminance, used to detect washed-out or night frames."""
 
+    sharpness: float = 0.0
+    """Focus measure: Laplacian variance, normalised. Zero when unavailable."""
+
+    phash: str = ""
+    """OpenCV 5 ``img_hash`` perceptual hash, 64-bit hex. Empty when unavailable."""
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -139,6 +145,62 @@ def color_anomaly(hsv: np.ndarray, baseline: np.ndarray | None) -> tuple[float, 
     return float(distance), blended
 
 
+_PHASH: Any = None
+"""Lazily built OpenCV 5 perceptual hasher (``cv2.img_hash``)."""
+
+
+def _phash_hasher() -> Any | None:
+    """``cv2.img_hash.PHash_create`` if OpenCV 5 contrib exposes it."""
+
+    global _PHASH
+    if not hasattr(cv2, "img_hash"):
+        return None
+    try:
+        if _PHASH is None:
+            _PHASH = cv2.img_hash.PHash_create()
+        return _PHASH
+    except Exception:
+        return None
+
+
+def perceptual_hash(gray: np.ndarray) -> str:
+    """64-bit perceptual hash of a frame, as a 16-char hex string.
+
+    Used for near-duplicate detection during selection: two frames that look
+    the same are the same piece of evidence, no matter how far apart in time
+    they were sampled. Returns ``""`` when ``cv2.img_hash`` is unavailable.
+    """
+
+    hasher = _phash_hasher()
+    if hasher is None or gray.size == 0:
+        return ""
+    try:
+        small = gray
+        if min(gray.shape[:2]) > 32:
+            small = cv2.resize(gray, (32, 32), interpolation=cv2.INTER_AREA)
+        digest = np.asarray(hasher.compute(small), dtype=np.uint8).reshape(-1)
+        return digest.tobytes().hex()
+    except Exception:
+        return ""
+
+
+def sharpness(gray: np.ndarray) -> float:
+    """Focus measure from the variance of the Laplacian, normalised to 0..1.
+
+    A blurred frame produces almost no high-frequency energy, so this separates
+    "nothing happened" from "something happened but the camera could not see it".
+    """
+
+    if gray.size == 0:
+        return 0.0
+    try:
+        lap = cv2.Laplacian(gray, cv2.CV_64F, ksize=3)
+        variance = float(np.var(lap))
+    except Exception:
+        return 0.0
+    return round(float(np.clip(variance / 1000.0, 0.0, 1.0)), 6)
+
+
 def preprocess(frame: np.ndarray, short_side: int) -> tuple[np.ndarray, np.ndarray]:
     """Return (gray, hsv) downscaled so the short side equals ``short_side``."""
 
@@ -181,5 +243,7 @@ def frame_signals(
         saliency=saliency_score(gray),
         color_anomaly=anomaly,
         luma=float(gray.mean() / 255.0),
+        sharpness=sharpness(gray),
+        phash=perceptual_hash(gray),
     )
     return signals, baseline
